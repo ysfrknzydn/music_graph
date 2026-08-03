@@ -34,19 +34,45 @@ exploratory phase.
 
 ## Current state
 
-Phase 0 of 9 (full roadmap in `todo.md`) — `scripts/phase0_count_tracks.py`
-counts unique tracks across Liked Songs, playlists, top tracks (3 ranges),
-and recently played, to size the dataset before later phases (graph
-construction, layout, rendering). **Read `todo.md` before resuming work**
-— it tracks exactly what's done, blocked, and left to do, kept current
-each session.
+Phase 0 of 9 (full roadmap in `todo.md`) is functionally complete —
+`scripts/phase0_count_tracks.py` runs end to end and found **7,990 unique
+tracks** across Liked Songs (195), playlists (2,577), top tracks/all 3
+ranges (7,319 unique — Spotify's `total` for `long_term` alone is 7,084,
+confirmed against the raw API response, not just the script's own count),
+and recently played (49). That number is above the plan's ~5k threshold
+for "any layout algorithm is fine, skip DrL" — worth revisiting at Phase
+6. **Read `todo.md` before resuming work** — it tracks exactly what's
+done, blocked, and left to do, kept current each session.
+
+**Design target (set 2026-08-03, post-Phase 0): handle at least 20,000
+nodes**, not just today's actual 7,990 — a forward-looking robustness
+target for library growth (more listening, more playlists), not a
+current-state fact. Evaluate Phase 6 (layout) and Phase 8 (interactive
+explorer performance) against 20k before considering either done.
 
 ## Architecture notes (current script)
 
 - `item_collector(results)` is the core reusable pattern: takes a first
   page from any paginated spotipy call, walks all subsequent pages via
   `current['next']` / `sp.next(current)`, and returns a flat list of raw
-  items. All four data sources go through this helper.
+  items. All data sources go through this helper.
+- `load_or_fetch(filepath, fetch_fn)` is the cache-aside helper: loads
+  `filepath` if it exists, otherwise calls `fetch_fn()` (passed as a
+  function/lambda — the call only happens on a cache miss) and writes the
+  result to `filepath` as JSON before returning it. All six raw fetches
+  (`liked_tracks`, `playlist_tracks`, `short_term`, `medium_term`,
+  `long_term`, `recent_tracks`) route through this; cache files live in
+  `data/` (gitignored).
+- Playlist fetching (`fetch_all_playlist_tracks()`) nests a **second**
+  `load_or_fetch()` call inside its per-playlist loop, keyed by playlist
+  ID (`data/playlist_<id>.json`), in addition to the outer
+  `load_or_fetch('data/playlist_tracks.json', fetch_all_playlist_tracks)`
+  wrapping the whole function. This isn't redundant: the outer cache
+  alone is all-or-nothing — a crash partway through the ~30-playlist loop
+  (this happened once, from a transient network timeout) would lose all
+  progress and re-hit the API for every playlist on retry. The inner
+  per-playlist cache makes each playlist's fetch independently
+  resumable, so a retry only re-fetches what didn't finish.
 - Spotify's playlist items endpoint (`playlist_items()`) wraps each entry
   under the key `'item'`, not `'track'` — inconsistent with
   `current_user_saved_tracks()` / `current_user_recently_played()` (which
@@ -56,8 +82,10 @@ each session.
 - Some playlists 403 on `playlist_items()` even though they're listed by
   `current_user_playlists()` (Spotify-owned algorithmic playlists,
   licensing-restricted ones) — wrapped in `try`/`except SpotifyException`
-  to skip and continue rather than crash.
-- No local caching yet (planned next, see `todo.md`) — every run re-hits
-  the live Spotify API for all four sources, which is slow and can
-  trigger long rate-limit lockouts (~24h observed) if run repeatedly
-  while debugging.
+  to skip and continue rather than crash. These don't get a cache file
+  written, so they're re-checked (not permanently assumed inaccessible)
+  on every run.
+- Docstring convention (established this session, apply to future
+  scripts too): module-level docstring at the top (one-line summary +
+  longer description), every function gets a Google-style docstring
+  (`Args:` / `Returns:`).

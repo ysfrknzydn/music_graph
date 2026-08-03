@@ -23,11 +23,42 @@ session, any amount of time later.
 - `.gitignore` covers: `venv/`, `.env`, `__pycache__/`, `*.pyc`, `.DS_Store`,
   `data/`, `.cache` (the last one holds spotipy's cached OAuth token).
 
-## Phase 0 — Find the actual scale (IN PROGRESS)
+## Phase 0 — Find the actual scale (DONE, 2026-08-03)
 
 **Goal**: count unique tracks across Liked Songs + playlists + top tracks
 (3 time ranges) + recently played, to know what we're dealing with before
 picking a layout algorithm in Phase 6.
+
+**Result — the actual exit condition for Phase 0**:
+
+| Source | Unique tracks |
+|---|---|
+| Liked Songs | 195 |
+| Playlists | 2,577 |
+| Top tracks (3 ranges, deduped) | 7,319 |
+| Recently played | 49 |
+| **All sources, deduped (`all_tracks_set`)** | **7,990** |
+
+Naive sum of the four counts is 10,140; the 2,150-track gap is overlap
+between sources (`playlist ∩ top` alone is 1,929 — makes sense, heavily
+playlisted songs are also heavily played). Confirmed the large `top_tracks`
+number isn't a pagination bug: Spotify's own API reports `total: 7084` for
+`long_term` directly in the raw response, checked independently of the
+script's own count.
+
+**This number is above the plan's ~5k threshold** ("under ~5k tracks, any
+standard force-directed layout is fine, skip DrL") — worth a real look at
+Phase 6 rather than assuming the simple case still applies, though 7,990 is
+still nowhere near Wikipedia's ~6M-node scale DrL was built for.
+
+**Design target set after Phase 0, 2026-08-03: handle at least 20,000
+nodes.** Not today's actual count (7,990) — a forward-looking robustness
+target so the graph keeps working as the library grows (more listening,
+more playlists) without needing another scale-driven rework later. This
+raises the bar past the plan's original "~5k is trivially fine" framing;
+Phase 6 (layout) and Phase 8 (interactive explorer performance) should be
+evaluated against 20k, not against today's 7,990, before calling either
+phase done.
 
 ### Done so far, in `scripts/phase0_count_tracks.py`
 
@@ -65,44 +96,32 @@ picking a layout algorithm in Phase 6.
 - Print statements for each count fixed (`str(len(...))` pattern — an
   earlier version tried to `+` a string and an int directly, which crashes).
 
-### Still to do for Phase 0
+### Caching, added this session (in `scripts/phase0_count_tracks.py`)
 
-1. **BLOCKED until API rate limit clears.** Hit Spotify's rate limit while
-   debugging (message: `Retry will occur after: 84765 s`, ≈ 23.5 hours,
-   surfaced during the 2026-07-31 evening session). This is Spotify's
-   server-enforced limit, not fixable client-side — don't re-run the
-   script against the live API until it clears, or the lockout likely
-   extends. If picking this up in a new session, check whether enough
-   time has passed (~24h from whenever the limit hit) before testing.
-2. **Add local JSON caching before running again** — this is the
-   immediate next step once unblocked, both to avoid re-triggering the
-   rate limit and because it's good practice generally. Design discussed
-   but not yet written:
-   - Use the built-in `json` module — `json.dump()` to write a list of
-     dicts to a file, `json.load()` to read it back, no conversion needed
-     since `item_collector`'s output is already plain lists of dicts.
-   - Store cache files in `data/` (already gitignored).
-   - Cache-aside pattern: before fetching a source, check if its
-     `data/<name>.json` file already exists — if so, load it instead of
-     hitting the API; if not, fetch normally, then save the result for
-     next time.
-   - Applies to all six raw fetches: `liked_tracks`, `playlist_tracks`,
-     `short_term`, `medium_term`, `long_term`, `recent_tracks`.
-   - **Open decision, not yet made**: write the check/load/save logic six
-     times (simple, repetitive), or wrap it in one reusable function that
-     takes a filename plus "what to do if there's no cache yet" (DRY, but
-     introduces passing a function as a value — a new concept vs. what's
-     been written so far). Conversation paused here — pick this back up
-     before writing the caching code.
-3. Once caching is in place and the rate limit has cleared, run the full
-   script and confirm the final output: per-source counts (liked /
-   playlist / top / recent) plus one deduped grand total. **That total is
-   the actual exit condition for Phase 0** — it determines which layout
-   algorithm is realistic in Phase 6 (see the plan file: under ~5k tracks,
-   any standard force-directed layout is fine; DrL is unnecessary at
-   personal-library scale regardless, most likely).
-4. Minor cleanup, not blocking: unused `import os` at the top of
-   `phase0_count_tracks.py` can be removed if nothing else ends up needing it.
+- `load_or_fetch(filepath, fetch_fn)` — cache-aside helper. Loads
+  `filepath` if it exists; otherwise calls `fetch_fn()` (passed as a
+  function/lambda, so the fetch only happens on a cache miss), writes the
+  result to `filepath` as JSON, and returns it. All six raw fetches route
+  through this; cache files live in `data/` (gitignored).
+- `fetch_all_playlist_tracks()` additionally nests a **second**
+  `load_or_fetch()` call per playlist, keyed by playlist ID
+  (`data/playlist_<id>.json`), on top of the outer
+  `load_or_fetch('data/playlist_tracks.json', fetch_all_playlist_tracks)`
+  wrapping the whole function. Found this was necessary the hard way: a
+  transient network timeout crashed the run partway through the ~30-
+  playlist loop, and since the outer cache is all-or-nothing, nothing from
+  that pass got saved — a retry would've re-fetched every playlist from
+  scratch. Per-playlist caching means a retry only re-fetches what didn't
+  finish.
+- Docstrings added to all three functions (module + `item_collector` +
+  `load_or_fetch` + `fetch_all_playlist_tracks`) — see the docstring
+  convention note under Standing Preferences below.
+
+### Not blocking, low priority
+
+- Unused `import os` at the top of `phase0_count_tracks.py` — actually now
+  *used*, by `load_or_fetch`'s `os.path.exists()` check. No longer stale,
+  nothing to clean up here.
 
 ## Known Spotify API gotchas learned so far (relevant beyond Phase 0 too)
 
@@ -117,17 +136,18 @@ picking a layout algorithm in Phase 6.
   other source used so far wraps under `'track'` or doesn't wrap at all
   (top tracks). Don't assume nesting is consistent across endpoints —
   check real returned data before writing extraction logic.
-- Rate limits can impose very long lockouts (~24h observed) if hammered
-  with repeated full-library re-fetches while debugging. Cache raw API
-  responses locally as soon as you're iterating on anything downstream of
-  a fetch — don't wait for "officially" reaching Phase 1 to start doing this.
+- Rate limits can impose very long lockouts (~24h observed, hit once on
+  2026-07-31, cleared by 2026-08-03) if hammered with repeated full-library
+  re-fetches while debugging. Local caching (`load_or_fetch`, see above) is
+  now in place specifically to avoid re-triggering this.
 
 ## Full phase roadmap (from the approved plan — see plan file for full detail)
 
-0. Find the actual scale — **IN PROGRESS**, see above.
-1. Raw data collection + local caching for all sources — partially
-   overlapping with Phase 0's caching add-on above; formalize once Phase 0
-   is fully done.
+0. Find the actual scale — **DONE**, see above (7,990 unique tracks).
+1. Raw data collection + local caching for all sources — Phase 0's
+   `load_or_fetch` caching covers this informally already; formalize (move
+   into its own module? decide when picking this phase up) as an explicit
+   Phase 1 step. **Not started.**
 2. Build the clean node table — one row per unique track, dedup (ISRC vs.
    track ID decision), genres joined in from artists, provenance flags per
    source. **Not started.**
@@ -139,8 +159,10 @@ picking a layout algorithm in Phase 6.
    **Not started.**
 5. Build the graph in `python-igraph` + run Leiden community detection
    (built into igraph, no separate `leidenalg` package needed). **Not started.**
-6. Layout — hand off to Gephi's GUI (ForceAtlas2 etc.), skip DrL unless
-   Phase 0's actual number turns out to be surprisingly large. **Not started.**
+6. Layout — hand off to Gephi's GUI (ForceAtlas2 etc.); re-evaluate DrL
+   given the 20k-node design target (see above) rather than defaulting to
+   "skip it," since that default was based on the plan's original ~5k
+   assumption. **Not started.**
 7. Static render — still in Gephi, color by Leiden community, export a
    high-res PNG/SVG. **Not started.**
 8. Interactive explorer — `pyvis` (Python, generates a self-contained
@@ -159,3 +181,15 @@ picking a layout algorithm in Phase 6.
 - Budget is $0 — every tool/library choice in the plan was picked
   specifically to avoid any paid service. Flag it clearly if a future step
   would require a real cost, and look for a free alternative first.
+- Docstring convention (established `scripts/phase0_count_tracks.py`,
+  2026-08-03): every script gets a module-level docstring at the top
+  (one-line summary + longer description), every function gets a
+  Google-style docstring (`Args:` / `Returns:`). User writes the actual
+  descriptions; when scaffolding a new file, add empty `TODO` skeletons in
+  this same shape rather than a different style.
+- **Scale target: 20,000+ nodes** (set 2026-08-03, after Phase 0's actual
+  count came in at 7,990). This is deliberately above today's real number
+  — it's a robustness target for library growth, not a current-state fact.
+  Evaluate every scale-sensitive decision from here on (Phase 6 layout
+  algorithm, Phase 8 interactive explorer performance) against 20k, not
+  against 7,990.

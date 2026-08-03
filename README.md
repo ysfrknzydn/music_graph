@@ -8,10 +8,17 @@ meaningful link.
 
 ## Status
 
-Early / exploratory. Currently on Phase 0: pulling data from the Spotify
-Web API and finding out how large this graph is actually going to be,
-before any graph-building or visualization work starts. See `todo.md` for
-detailed, current progress and next steps.
+Early / exploratory. Phase 0 is done: pulled data from the Spotify Web API
+and found **7,990 unique tracks** across Liked Songs, playlists, top
+tracks, and recently played — the number that determines what's realistic
+for later layout/rendering phases. Local JSON caching is in place so
+re-runs don't re-hit the API. See `todo.md` for detailed, current progress
+and next steps, or `project_plan.pdf` for the full original architecture
+plan.
+
+**Scale target**: the finished graph should handle at least 20,000 nodes
+robustly — well above today's actual 7,990 — so it keeps working as the
+library grows rather than needing another scale-driven rework later.
 
 ## Setup
 
