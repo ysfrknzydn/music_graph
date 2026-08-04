@@ -5,8 +5,6 @@ session, any amount of time later.
 
 ## Where things live
 
-- Full architecture plan (why decisions were made, all tooling choices, cost
-  breakdown): `/Users/yusuf/.claude/plans/pure-spinning-toast.md`
 - Repo: https://github.com/ysfrknzydn/music_graph (public)
 - Local path: `/Users/yusuf/Desktop/projects/music_graph`
 - Spotify Developer app: named "Music Graph", redirect URI

@@ -7,3 +7,5 @@ data/
 .cache
 .Rhistory
 todo.html
+CLAUDE.md
+.claude/
