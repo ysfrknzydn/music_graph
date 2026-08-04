@@ -12,8 +12,8 @@ Early / exploratory. Phase 0 is done: pulled data from the Spotify Web API
 and found **7,990 unique tracks** across Liked Songs, playlists, top
 tracks, and recently played — the number that determines what's realistic
 for later layout/rendering phases. Local JSON caching is in place so
-re-runs don't re-hit the API. See `todo.md` for detailed, current progress
-and next steps, or `project_plan.pdf` for the full original architecture
+re-runs don't re-hit the API. See `docs/todo.md` for detailed, current progress
+and next steps, or `docs/project_plan.pdf` for the full original architecture
 plan.
 
 **Scale target**: the finished graph should handle at least 20,000 nodes
@@ -54,7 +54,7 @@ Developer app (free, at [developer.spotify.com](https://developer.spotify.com)).
 7. Static render
 8. Interactive explorer (`pyvis`, optionally `sigma.js`)
 
-Full detail and current status in `todo.md`.
+Full detail and current status in `docs/todo.md`.
 
 ## Cost
 
