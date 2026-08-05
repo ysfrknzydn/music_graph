@@ -12,9 +12,10 @@ Early / exploratory. Phase 0 is done: pulled data from the Spotify Web API
 and found **7,990 unique tracks** across Liked Songs, playlists, top
 tracks, and recently played — the number that determines what's realistic
 for later layout/rendering phases. Local JSON caching is in place so
-re-runs don't re-hit the API. See `docs/todo.md` for detailed, current progress
-and next steps, or `docs/project_plan.pdf` for the full original architecture
-plan.
+re-runs don't re-hit the API. Phase 1 (raw data collection, including
+per-artist data) is in progress. See `docs/todo.md` for detailed, current
+progress and next steps, or `docs/project_plan.pdf` for the full original
+architecture plan.
 
 **Scale target**: the finished graph should handle at least 20,000 nodes
 robustly — well above today's actual 7,990 — so it keeps working as the
