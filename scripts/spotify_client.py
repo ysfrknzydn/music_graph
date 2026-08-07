@@ -94,6 +94,19 @@ class SpotifyClient:
             self.sp.current_user_top_tracks(time_range=time_range)
         )
 
+    def get_top_artists(self, time_range):
+        """Fetches the current user's top artists for one time range.
+
+        Args:
+            time_range: one of "short_term", "medium_term", "long_term".
+
+        Returns:
+            List of full Artist objects for that time range, across all pages.
+        """
+        return self.item_collector(
+            self.sp.current_user_top_artists(time_range=time_range)
+        )
+
     def get_recently_played(self):
         """Fetches the current user's recently played tracks.
 
@@ -110,7 +123,7 @@ class SpotifyClient:
 
         Returns:
             The full artist object
-        """        
+        """
         return self._call_with_retry(lambda: self.sp.artist(artist_id))
 
     def get_album(self, album_id):

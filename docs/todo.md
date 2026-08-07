@@ -3,16 +3,39 @@
 Living status doc. Read this first when picking the project back up, in any
 session, any amount of time later.
 
-## Resume point — start here next session (as of 2026-08-05)
+## Resume point — start here next session (as of 2026-08-06)
 
-**Blocked on**: a Spotify rate-limit lockout hit 2026-08-05 while testing
-`ArtistCollector` live (full detail in the gotchas section below). Spotify's
-own stated `Retry-After` on the last request was ~23h, but treat that as a
-lower bound, not a guarantee — the prior 2026-07-31 incident took roughly 3
-days to fully clear, not 24h. **Do not re-run
-`scripts/phase1_collect_data.py` until confident the window has actually
-passed** — retrying while still limited risks resetting or extending the
-lockout further, which is part of what happened this time.
+**Blocked on**: a third Spotify rate-limit lockout, hit 2026-08-06 ~20:48
+EDT, during a full `phase1_collect_data.py` run. Timeline this round:
+
+1. 2026-08-05 ~00:02: first `ArtistCollector` lockout (`Retry-After: 83316s`,
+   ~23.1h) — see gotchas below for full detail.
+2. 2026-08-06, before the full run: verified the window had cleared with a
+   single live `client.get_artist()` call on an uncached artist ID — it
+   succeeded cleanly.
+3. 2026-08-06 ~20:48: ran the full `phase1_collect_data.py`. It got through
+   all playlist fetching, then into `ArtistCollector.fetch_all()` — **599
+   artist calls succeeded** (cached artist count went 597 → 1,196) before
+   hitting `Your application has reached a rate/request limit. Retry will
+   occur after: 86236 s` (~23.95h). Manually interrupted with Ctrl+C.
+   Earliest safe retry: **~2026-08-07 20:45 EDT**.
+
+**Key correction, 2026-08-06**: the single-call verification in step 2 was
+necessary but not sufficient — it only proves the limiter isn't tripped at
+that instant, not that sustained volume (hundreds of calls in a row) is
+safe. The limit is almost certainly a rolling window across the whole app,
+which a single call can't detect. The `0.1s` pacing in `_call_with_retry`
+held for 599 consecutive calls before failing, so it's not obviously wrong
+either, but it's clearly not sufficient on its own for a ~2,368-call batch —
+either the delay needs to increase, or the loop needs to check for/back off
+before a full-window's worth of calls accumulates. (An earlier note here
+also wrongly treated the 2026-07-31 incident's "3 days to clear" as evidence
+`Retry-After` itself is unreliable — that was actually just a weekend gap
+with no retry attempt, not a measured duration. `Retry-After` appears to be
+the accurate signal both times it's been tested.)
+
+**Do not touch the script again — not even a single test call — before the
+2026-08-07 ~20:45 EDT window above.**
 
 **What's already built and reviewed, ready to run once unblocked** — all of
 Phase 1's fetch pipeline up through artist collection is done:
@@ -42,21 +65,42 @@ Phase 1's fetch pipeline up through artist collection is done:
   check confirmed all 2,965 unique artist IDs collected were valid
   (`None in ids? False`) — not the source of the 403s hit earlier.
 
-**Next steps, in order**:
+**Next steps, in order** — supersedes the old "just re-run with more
+pacing" plan; see "Final genre-collection plan, decided 2026-08-06" under
+Phase 1 below for the full reasoning:
 
-1. Confirm the rate-limit window has actually cleared before touching the
-   script again — if unsure, wait longer rather than testing early.
-2. Re-run `python3 scripts/phase1_collect_data.py` and let it run to full
-   completion this time. Watch whether `0.1`s pacing is actually enough
-   (no repeated "rate/request limit" messages); if it still trips the
-   limiter, the delay needs to increase.
-3. Once a full run succeeds: fill in `phase1_collect_data.py`'s module
-   docstring — intentionally left as `TODO` until the file's full scope
-   (below) is built out.
-4. Build `AlbumCollector`, same pattern as `ArtistCollector`.
+1. Add `current_user_top_artists()` (3 calls, one per time range) as a new
+   source in `ArtistCollector`/`__main__` — free, zero-risk, returns
+   Spotify's own authoritative `genres` field directly for whatever artists
+   show up there. Do this regardless of anything else below.
+2. Build a small MusicBrainz lookup path (new class, e.g. `MusicbrainzClient`
+   — user's call on exact shape) that, for each remaining artist, takes one
+   of their tracks' `external_ids.isrc` (already sitting in the cached raw
+   track JSON — no new Spotify calls needed to get it), looks up the
+   recording via MusicBrainz's ISRC endpoint, and pulls genre tags from the
+   resolved artist-credit. Pace at ~1 req/sec (MusicBrainz's documented
+   limit); no API key needed, just a descriptive `User-Agent` header per
+   their etiquette rules. Tag every artist's genre with its source
+   (`spotify_top_artists` / `musicbrainz` / `spotify_direct`) so nothing
+   from a non-Spotify source is silently indistinguishable from verified
+   data — ties into Phase 2's already-planned provenance columns.
+3. Whatever MusicBrainz can't resolve (no ISRC hit, or too obscure to be
+   catalogued) falls back to the original plan: `SpotifyClient.get_artist()`
+   per remaining ID, budgeted across multiple days via the existing
+   per-artist caching (run until the quota trips, resume the next day — see
+   "Third rate-limit lockout" gotcha). This remainder should be
+   substantially smaller than the full 1,769 artists still outstanding as of
+   2026-08-06, but exact size is unknown until step 2 actually runs.
+4. Once genre coverage is as complete as steps 1-3 get it: fill in
+   `phase1_collect_data.py`'s module docstring — intentionally left as
+   `TODO` until the file's full scope is built out.
+5. Build `AlbumCollector`, same pattern as `ArtistCollector`.
    `SpotifyClient.get_album()` is already built and ready to use — no
-   batching/chunking this time, that lesson's already learned.
-5. Still open from Phase 1's original scope, not yet built: actually
+   batching/chunking this time, that lesson's already learned. Same
+   quota-wall risk applies here too (unconfirmed whether albums share a
+   bucket with artists) — worth watching for the same ~600-call ceiling
+   rather than assuming it's artist-specific.
+6. Still open from Phase 1's original scope, not yet built: actually
    caching the `/me` profile response (currently only `["id"]` is pulled
    out and used for namespacing every run — the full profile object is
    fetched live but never written through `load_or_fetch`); the `json`
@@ -238,6 +282,74 @@ cache — plan doc flags this as a live choice, not yet decided.
 every artist ID referenced has a cached genre list; every album ID
 referenced has a cached full album object.
 
+### Final genre-collection plan, decided 2026-08-06
+
+Context: three separate rate-limit/quota lockouts (2026-07-31, 2026-08-05,
+2026-08-06 — full detail in gotchas below) made it clear that finishing
+genre collection via `SpotifyClient.get_artist()` alone means spreading
+~1,769 remaining artist fetches (2,965 total unique, 1,196 cached as of
+2026-08-06) across several days, since it's a per-developer-account quota
+wall, not something pacing can fix. Researched alternatives properly before
+committing to one — see "Next steps" above for the resulting plan. Summary
+of what was ruled in/out and why:
+
+- **`current_user_top_artists()`** — free, zero risk, not currently called
+  anywhere in this project even though `current_user_top_tracks()` is.
+  Returns full Spotify Artist objects (genres included) directly. Doing
+  this regardless of what else gets built.
+- **Last.fm API** — evaluated and **rejected as a genre source**. It's fast
+  (5 req/s documented limit, no daily quota) and free, but: (1) Spotify's
+  Artist object exposes no MusicBrainz ID or any other cross-reference ID,
+  so matching against Last.fm can only be done by artist *name string*, not
+  ID; (2) Last.fm's own support forum confirms it cannot reliably
+  distinguish two different artists sharing a name — they share a page —
+  and its own suggested fix (matching by `mbid`) has confirmed bugs
+  returning the wrong artist even when an mbid is supplied, and isn't
+  available to us anyway since Spotify gives no mbid; (3) academic research
+  on Last.fm's genre tags documents real, non-trivial noise (e.g. blues
+  tracks tagged "zydeco"/"cajun"/"swing", disco tagged "80s"/"pop"/"funk") —
+  serious enough that papers using Last.fm tags as ground truth only do so
+  after cross-dataset aggregation, not from a single artist's raw tag list.
+  Given the explicit priority of not letting bad data into the graph, this
+  didn't clear the bar.
+- **MusicBrainz, via ISRC lookup — chosen instead of Last.fm.** Genre-tag
+  noise is actually comparable to Last.fm's (MusicBrainz "genres" are the
+  same underlying upvoted/downvoted folksonomy mechanism, and MusicBrainz's
+  own docs admit incomplete coverage, especially non-Western genres) — so
+  this is *not* a genre-content-quality upgrade. The real win is
+  **identity correctness**: Spotify's Track object includes
+  `external_ids.isrc` (confirmed against Spotify's API reference), already
+  sitting in the raw cached track JSON for free since tracks are cached
+  whole. MusicBrainz supports recording lookup by ISRC, resolving to an
+  exact artist-credit — no name-guessing, so no same-name-artist collision
+  risk. That directly targets the actual failure mode of concern (wrong
+  artist's data silently attached to a node), even though the genre-label
+  noise itself is a separate, still-present risk shared with Last.fm and,
+  to a lesser extent, with Spotify's own genre field. Real caveat: ISRC
+  coverage in MusicBrainz isn't complete, particularly for obscure/indie
+  tracks — expect a residual fallback set.
+- **Multiple developer accounts / Client IDs to dodge the quota** —
+  considered and rejected. Spotify's 2026-07-23 quota update explicitly
+  moved counting to be *per developer account* rather than per-app, closing
+  that loophole. A second Spotify account would technically get a fresh
+  quota but risks a Developer ToS violation; not worth the risk for a
+  personal project.
+- **Unofficial scraping (browser session cookies + account/VPN rotation)**
+  — real prior art exists (a GitHub project claiming 13M artists scraped
+  this way), but it works by extracting session cookies from logged-in
+  accounts and rotating accounts/VPNs specifically to evade Spotify's
+  blocking when caught. Not something to replicate — real ToS violation and
+  account-ban risk, and ruled out on principle, not just cost/benefit.
+- **Precompiled Kaggle/HuggingFace genre datasets** — considered, rejected.
+  The well-known ones derive genre from Spotify's now-deprecated
+  genre-seed/recommendations search, not the artist's real `genres` field,
+  and key by artist name rather than ID — same matching risk as Last.fm,
+  plus a less authoritative notion of "genre" than what this project wants.
+- **Extended Quota Mode** (would raise Spotify's own limits) — closed off;
+  see the "Known constraint" note under Future Direction below. Not
+  reachable for a solo project regardless of how this genre problem gets
+  solved.
+
 ## Known Spotify API gotchas learned so far (relevant beyond Phase 0 too)
 
 - Genre only exists on the **artist** object (`/artists`), never per-track —
@@ -251,10 +363,15 @@ referenced has a cached full album object.
   other source used so far wraps under `'track'` or doesn't wrap at all
   (top tracks). Don't assume nesting is consistent across endpoints —
   check real returned data before writing extraction logic.
-- Rate limits can impose very long lockouts (~24h observed, hit once on
-  2026-07-31, cleared by 2026-08-03) if hammered with repeated full-library
-  re-fetches while debugging. Local caching (`load_or_fetch`, see above) is
-  now in place specifically to avoid re-triggering this.
+- Rate limits can impose very long lockouts (~24h observed via
+  `Retry-After`, hit once on 2026-07-31) if hammered with repeated
+  full-library re-fetches while debugging. Local caching (`load_or_fetch`,
+  see above) is now in place specifically to avoid re-triggering this.
+  Note: the 2026-07-31 incident wasn't actually retried until
+  2026-08-03 (a weekend gap, not a deliberate wait-and-test), so "cleared by
+  2026-08-03" was never a measured lockout duration — don't treat it as
+  evidence the stated `Retry-After` window is unreliable (see correction in
+  the 2026-08-05 gotcha below and the "Resume point" section at top).
 - **Spotify's February 2026 API update removed the bulk catalog-fetch
   endpoints** (`GET /artists`, `GET /albums`, `GET /tracks`, and others —
   all the `?ids=`-batched "get several X" endpoints), replaced by singular
@@ -290,6 +407,60 @@ referenced has a cached full album object.
   artists fetched successfully before the interrupt are saved, so a resumed
   run only needs the remainder. Do not re-run immediately after hitting
   this — retrying while still rate-limited risks extending the lockout.
+- **Third rate-limit lockout, hit 2026-08-06 ~20:48 EDT**: the `time.sleep(0.1)`
+  pacing fix added after the second incident was live for this run, and
+  still wasn't enough — 599 consecutive `get_artist` calls succeeded (cached
+  artist count 597 → 1,196) before `Retry-After: 86236s` (~23.95h) hit.
+  Confirms `0.1s` reduces but doesn't eliminate the risk: it's paced enough
+  to survive a while, not enough to safely clear a ~2,368-call batch in one
+  go. A single isolated test call succeeding earlier the same day (see
+  "Resume point" above) did *not* predict this — a lone call can't detect a
+  rolling-window limit that only trips under sustained volume. Next attempt
+  needs a larger delay (exact value not yet chosen) before re-running the
+  full batch. Earliest retry: 2026-08-07 ~20:45 EDT.
+- **Correction, 2026-08-06 — this is likely a quota wall, not a rate limit,
+  so pacing alone can't fix it**: researched directly against Spotify's own
+  docs. Spotify runs two separate limiting systems: the classic rolling
+  30-second rate limit (what pacing/backoff protects against), and a
+  **quota system** specific to Development Mode apps, added/updated
+  2026-07-23, counted per developer account and grouped into per-endpoint
+  "quota buckets" with undisclosed limits — explicitly documented as
+  "different from rate limits," distinguishable via a `"reason":
+  "QUOTA_EXCEEDED"` field in the 429 body (not currently visible in this
+  project's logs, since spotipy's own low-level retry consumes the raw
+  response before `SpotifyException` ever bubbles up — see the 2026-08-05
+  gotcha above). This fits the observed data much better than a rate limit
+  would: 0.1s pacing changed nothing about the ~599-600 call ceiling, which
+  is what you'd expect from a fixed quota budget (pacing only affects the
+  30s rate limit, not a separate quota counter) and not what you'd expect
+  from throttling (slower pacing should let more total calls through before
+  tripping, not the same count). Practical implication: no delay value
+  "solves" this — it only changes how long it takes to hit the same wall.
+  The actual fix is budgeting the remaining artist fetches (1,769 as of
+  2026-08-06) across multiple days (run until it trips, resume the next day
+  — already free via existing per-artist caching), not tuning `time.sleep()`
+  further. Sources:
+  [Quota modes](https://developer.spotify.com/documentation/web-api/concepts/quota-modes),
+  [Web API quota updates for Development Mode (blog)](https://developer.spotify.com/blog/2026-07-23-web-api-quota-updates).
+- **Cheap partial mitigation, found 2026-08-06 — `current_user_top_artists()`
+  is unused and returns genres for free**: `phase1_collect_data.py` only
+  calls `current_user_top_tracks()` (3 time ranges), whose track objects
+  carry *simplified* artist sub-objects (id/name only, no genres) — that's
+  why every artist needs a follow-up `/artists/{id}` call today. Spotify's
+  API reference confirms the sibling endpoint, `Get User's Top Items` with
+  `type=artists` (i.e. `current_user_top_artists()`, not currently called
+  anywhere in this project), returns full Artist objects — genres,
+  followers, popularity, images — directly, in ~3 cheap paginated calls
+  total (one per time range), no per-ID fetch needed. Likely (not confirmed)
+  in a different quota bucket than `/artists/{id}` catalog calls, since it's
+  a different API surface (personalization vs. catalog), meaning it may
+  still work even while the artists bucket is cooling down. Worth adding as
+  a fifth source in `ArtistCollector`/`__main__` before falling back to
+  individual per-ID fetches — shrinks the long-tail count, doesn't
+  eliminate it (playlist/liked-song artists that never appear in top
+  artists still need individual fetches; full-library genre coverage is a
+  fundamentally bigger ask than what "top items"-only apps like Receiptify
+  need). Source: [Get User's Top Items reference](https://developer.spotify.com/documentation/web-api/reference/get-users-top-artists-and-tracks).
 
 ## Full phase roadmap (from the approved plan — see plan file for full detail)
 
@@ -349,11 +520,33 @@ conversation but are architecturally different:
   that refreshes many users, not just one. Stays $0-feasible via free tiers
   (e.g. Render/Fly/Vercel + Supabase), but is a genuinely separate build,
   not a bullet point on the existing roadmap.
-- **Known constraint, will bite later if forgotten**: the Spotify app is
-  currently in **Development Mode, capped at 25 registered users**. Sharing
-  with more people than that requires Spotify's Extended Quota Mode
-  approval — worth applying for early once this direction is actually
-  pursued, since approval isn't instant.
+- **Known constraint, corrected 2026-08-06 — this direction is much less
+  reachable than previously assumed**: earlier notes here said Development
+  Mode caps at "25 registered users" and that sharing more widely "requires
+  applying for Extended Quota Mode." Checked directly against Spotify's own
+  docs this session:
+  - Development Mode's actual authenticated-user cap is **5 users**, not 25.
+    The "25" number is a different, unrelated limit — the max number of
+    Client IDs (i.e. separate apps) allowed per developer account, raised
+    from a lower number in a 2026-07-23 quota-system update. Don't conflate
+    the two.
+  - Far more importantly: **as of May 2025, Spotify only accepts Extended
+    Quota Mode applications from registered businesses/organizations with
+    proof of revenue and at least 250,000 Monthly Active Users** — individual
+    developers can no longer apply at all, regardless of how good the app
+    is. This isn't a matter of applying early; it's currently a closed door
+    for a solo personal project. Apps like Receiptify/stats.fm that serve
+    many public users almost certainly got production access before this
+    policy tightened, not through any technique available to a new
+    individual developer today.
+  - Net effect: the "public website where others connect their own Spotify
+    accounts" idea below is not dead, but its ceiling is Development Mode's
+    5-user cap unless/until this project becomes a registered business
+    clearing Spotify's 250k-MAU bar — worth knowing now rather than
+    discovering it after building the backend/database work described
+    below. Sources:
+    [Quota modes](https://developer.spotify.com/documentation/web-api/concepts/quota-modes),
+    [Extended Quota application requirements (community)](https://community.spotify.com/t5/Spotify-for-Developers/development-mode-to-extended-quota-mode/td-p/7345683).
 
 ## Standing preferences (for whoever/whatever picks this up)
 
